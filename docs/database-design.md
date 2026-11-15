@@ -1,685 +1,299 @@
-# FixFlow – Database Design Document
+# FixFlow Database Design Documentation
 
-**Project:** FixFlow – Smart Maintenance and Complaint Management Platform  
-**Version:** 1.0.0  
-**Status:** Draft  
-**Date:** 2026-11-15  
-**Author:** FixFlow Architecture Team  
-**Database Engine:** MySQL 8.0+
+**Overview**
+
+FixFlow is a Smart Maintenance and Complaint Management Platform built as a collection of five independent micro‑services.  Each service owns its own MySQL database to enforce strong data‑ownership boundaries, enable independent scaling, and simplify schema evolution.  The services communicate exclusively through **REST/gRPC APIs** and **Kafka events**; no service accesses another service’s tables directly.
 
 ---
 
-## Table of Contents
+## 1. Identity Service
 
-1. [Design Principles](#1-design-principles)
-2. [Database Schemas Overview](#2-database-schemas-overview)
-3. [User Service Database – `fixflow_users`](#3-user-service-database--fixflow_users)
-4. [Complaint Service Database – `fixflow_complaints`](#4-complaint-service-database--fixflow_complaints)
-5. [Technician Service Database – `fixflow_technicians`](#5-technician-service-database--fixflow_technicians)
-6. [Notification Service Database – `fixflow_notifications`](#6-notification-service-database--fixflow_notifications)
-7. [Reporting Service Database – `fixflow_reporting`](#7-reporting-service-database--fixflow_reporting)
-8. [Entity Relationship Overview](#8-entity-relationship-overview)
-9. [Data Types & Conventions](#9-data-types--conventions)
-10. [Indexing Strategy](#10-indexing-strategy)
+### Purpose
+Manages user accounts, authentication data, roles and permissions.
 
----
+### Tables
+| Table | Description |
+|-------|-------------|
+| `users` | Core user profile.
+| `user_credentials` | Password hash, MFA secrets.
+| `user_roles` | Association of users to role definitions.
+| `roles` | Role definitions and their default permissions.
+| `oauth_providers` | External identity providers (Google, Azure AD, …).
 
-## 1. Design Principles
-
-| Principle | Description |
-|-----------|-------------|
-| **Database per Service** | Each microservice owns a separate MySQL schema; no cross-schema JOINs |
-| **UUID Primary Keys** | All entities use `CHAR(36)` UUID primary keys to support distributed generation |
-| **Soft Deletes** | Entities use `is_deleted BOOLEAN` and `deleted_at TIMESTAMP` instead of hard deletes |
-| **Tenant Isolation** | All business entities include `tenant_id` for multi-tenant data isolation |
-| **Audit Columns** | Every table includes `created_at`, `updated_at`, `created_by`, `updated_by` |
-| **Enum as VARCHAR** | Status and type enums stored as `VARCHAR(50)` with CHECK constraints for readability |
-| **Flyway Migrations** | All schema changes managed via Flyway versioned migration scripts |
-| **Optimistic Locking** | Entities subject to concurrent updates include a `version` column (Hibernate `@Version`) |
-
----
-
-## 2. Database Schemas Overview
-
-| Schema | Service | Tables |
-|--------|---------|--------|
-| `fixflow_users` | User Service | tenants, users, roles, user_roles, refresh_tokens, audit_logs |
-| `fixflow_complaints` | Complaint Service | complaints, complaint_attachments, complaint_comments, sla_configurations |
-| `fixflow_technicians` | Technician Service | technicians, technician_skills, assignments, assignment_notes, technician_availability |
-| `fixflow_notifications` | Notification Service | notification_templates, notifications, notification_logs |
-| `fixflow_reporting` | Reporting Service | complaint_metrics, technician_metrics, audit_events, report_schedules |
-
----
-
-## 3. User Service Database – `fixflow_users`
-
-### 3.1 `tenants`
-
-Stores top-level tenant (organization) records. All users belong to a tenant.
-
-```sql
-CREATE TABLE tenants (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    name            VARCHAR(255)    NOT NULL,
-    slug            VARCHAR(100)    NOT NULL UNIQUE,          -- URL-safe identifier
-    contact_email   VARCHAR(255)    NOT NULL,
-    contact_phone   VARCHAR(20),
-    address         TEXT,
-    plan            VARCHAR(50)     NOT NULL DEFAULT 'STANDARD',  -- STANDARD, PREMIUM, ENTERPRISE
-    is_active       BOOLEAN         NOT NULL DEFAULT TRUE,
-    is_deleted      BOOLEAN         NOT NULL DEFAULT FALSE,
-    deleted_at      TIMESTAMP       NULL,
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT chk_tenants_plan CHECK (plan IN ('STANDARD','PREMIUM','ENTERPRISE'))
-);
-```
-
----
-
-### 3.2 `users`
-
-Core user entity. Linked to a tenant. Credentials stored here.
-
+#### `users`
 ```sql
 CREATE TABLE users (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    tenant_id       CHAR(36)        NOT NULL,
-    first_name      VARCHAR(100)    NOT NULL,
-    last_name       VARCHAR(100)    NOT NULL,
-    email           VARCHAR(255)    NOT NULL,
-    phone           VARCHAR(20),
-    password_hash   VARCHAR(255)    NOT NULL,
-    avatar_url      VARCHAR(500),
-    status          VARCHAR(50)     NOT NULL DEFAULT 'ACTIVE',
-    mfa_enabled     BOOLEAN         NOT NULL DEFAULT FALSE,
-    mfa_secret      VARCHAR(255),                              -- Encrypted TOTP secret
-    failed_logins   INT             NOT NULL DEFAULT 0,
-    locked_until    TIMESTAMP       NULL,
-    last_login_at   TIMESTAMP       NULL,
-    is_deleted      BOOLEAN         NOT NULL DEFAULT FALSE,
-    deleted_at      TIMESTAMP       NULL,
-    version         INT             NOT NULL DEFAULT 0,        -- Optimistic locking
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    created_by      CHAR(36),
-    updated_by      CHAR(36),
-    CONSTRAINT uq_users_email_tenant UNIQUE (email, tenant_id),
-    CONSTRAINT chk_users_status CHECK (status IN ('ACTIVE','INACTIVE','LOCKED','PENDING_VERIFICATION')),
-    CONSTRAINT fk_users_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id)
-);
+    user_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    status ENUM('ACTIVE','SUSPENDED','DELETED') NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
 ```
+*Indexes*: unique on `username`, `email`.
 
----
+#### `user_credentials`
+```sql
+CREATE TABLE user_credentials (
+    user_id BIGINT UNSIGNED PRIMARY KEY,
+    password_hash CHAR(60) NOT NULL,
+    mfa_secret VARCHAR(255),
+    password_last_changed TIMESTAMP,
+    CONSTRAINT fk_user_credentials_user FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+```
+*Note*: one‑to‑one with `users`.
 
-### 3.3 `roles`
-
-System-level role definitions.
-
+#### `roles` & `user_roles`
 ```sql
 CREATE TABLE roles (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    name            VARCHAR(50)     NOT NULL UNIQUE,          -- ADMIN, MANAGER, TECHNICIAN, CUSTOMER
-    description     VARCHAR(255),
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_roles_name CHECK (name IN ('ADMIN','MANAGER','TECHNICIAN','CUSTOMER'))
-);
-```
+    role_id SMALLINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    role_name VARCHAR(50) NOT NULL UNIQUE,
+    description VARCHAR(255)
+) ENGINE=InnoDB;
 
----
-
-### 3.4 `user_roles`
-
-Many-to-many join: a user can have multiple roles within a tenant context.
-
-```sql
 CREATE TABLE user_roles (
-    user_id         CHAR(36)        NOT NULL,
-    role_id         CHAR(36)        NOT NULL,
-    assigned_at     TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    assigned_by     CHAR(36),
+    user_id BIGINT UNSIGNED NOT NULL,
+    role_id SMALLINT UNSIGNED NOT NULL,
+    assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, role_id),
-    CONSTRAINT fk_ur_user FOREIGN KEY (user_id) REFERENCES users(id),
-    CONSTRAINT fk_ur_role FOREIGN KEY (role_id) REFERENCES roles(id)
-);
+    CONSTRAINT fk_user_roles_user FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    CONSTRAINT fk_user_roles_role FOREIGN KEY (role_id) REFERENCES roles(role_id) ON DELETE RESTRICT
+) ENGINE=InnoDB;
 ```
-
 ---
 
-### 3.5 `refresh_tokens`
+## 2. Complaint Service
 
-Stores issued refresh tokens for token rotation.
+### Purpose
+Collects, tracks, and resolves citizen or tenant complaints.
 
-```sql
-CREATE TABLE refresh_tokens (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    user_id         CHAR(36)        NOT NULL,
-    token_hash      VARCHAR(255)    NOT NULL UNIQUE,          -- SHA-256 hash of token
-    issued_at       TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at      TIMESTAMP       NOT NULL,
-    revoked         BOOLEAN         NOT NULL DEFAULT FALSE,
-    revoked_at      TIMESTAMP       NULL,
-    ip_address      VARCHAR(45),
-    user_agent      VARCHAR(500),
-    CONSTRAINT fk_rt_user FOREIGN KEY (user_id) REFERENCES users(id)
-);
+### Tables
+| Table | Description |
+|-------|-------------|
+| `complaints` | Main complaint record.
+| `complaint_attachments` | Files/images linked to a complaint.
+| `complaint_comments` | Free‑form comments from users, agents.
+| `complaint_history` | Immutable audit trail of state changes.
 
-CREATE INDEX idx_rt_user_id ON refresh_tokens(user_id);
-CREATE INDEX idx_rt_expires_at ON refresh_tokens(expires_at);
-```
-
----
-
-### 3.6 `user_audit_logs`
-
-Immutable audit trail for user service operations.
-
-```sql
-CREATE TABLE user_audit_logs (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    tenant_id       CHAR(36)        NOT NULL,
-    actor_id        CHAR(36),                                 -- User performing the action
-    action          VARCHAR(100)    NOT NULL,                 -- USER_CREATED, ROLE_ASSIGNED, etc.
-    target_type     VARCHAR(100),                             -- User, Tenant, Role
-    target_id       CHAR(36),
-    details         JSON,
-    ip_address      VARCHAR(45),
-    occurred_at     TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_ual_tenant (tenant_id),
-    INDEX idx_ual_actor (actor_id),
-    INDEX idx_ual_occurred (occurred_at)
-);
-```
-
----
-
-## 4. Complaint Service Database – `fixflow_complaints`
-
-### 4.1 `sla_configurations`
-
-Defines SLA resolution timeframes per category and priority, per tenant.
-
-```sql
-CREATE TABLE sla_configurations (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    tenant_id       CHAR(36)        NOT NULL,
-    category        VARCHAR(50)     NOT NULL,
-    priority        VARCHAR(20)     NOT NULL,
-    resolution_hours INT            NOT NULL,                 -- Target resolution in hours
-    escalation_hours INT            NOT NULL,                 -- Escalate if unresolved after N hours
-    is_active       BOOLEAN         NOT NULL DEFAULT TRUE,
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT uq_sla_tenant_cat_pri UNIQUE (tenant_id, category, priority),
-    CONSTRAINT chk_sla_category CHECK (category IN ('ELECTRICAL','PLUMBING','HVAC','STRUCTURAL','IT','CLEANING','SAFETY','OTHER')),
-    CONSTRAINT chk_sla_priority CHECK (priority IN ('CRITICAL','HIGH','MEDIUM','LOW'))
-);
-```
-
----
-
-### 4.2 `complaints`
-
-Core complaint entity with full lifecycle tracking.
-
+#### `complaints`
 ```sql
 CREATE TABLE complaints (
-    id                  CHAR(36)        NOT NULL PRIMARY KEY,
-    tenant_id           CHAR(36)        NOT NULL,
-    reference_number    VARCHAR(20)     NOT NULL UNIQUE,      -- e.g. FX-2026-00001
-    title               VARCHAR(255)    NOT NULL,
-    description         TEXT            NOT NULL,
-    category            VARCHAR(50)     NOT NULL,
-    priority            VARCHAR(20)     NOT NULL,
-    status              VARCHAR(50)     NOT NULL DEFAULT 'OPEN',
-    location            VARCHAR(500),                         -- Room/zone/building
-    requester_id        CHAR(36)        NOT NULL,             -- Ref to users.id (User Service)
-    assigned_to_id      CHAR(36),                             -- Ref to technicians.id (Technician Service)
-    sla_deadline        TIMESTAMP       NULL,
-    sla_breached        BOOLEAN         NOT NULL DEFAULT FALSE,
-    escalated           BOOLEAN         NOT NULL DEFAULT FALSE,
-    escalated_at        TIMESTAMP       NULL,
-    resolved_at         TIMESTAMP       NULL,
-    closed_at           TIMESTAMP       NULL,
-    resolution_notes    TEXT,
-    satisfaction_score  TINYINT         NULL,                 -- 1-5 rating from customer
-    is_deleted          BOOLEAN         NOT NULL DEFAULT FALSE,
-    deleted_at          TIMESTAMP       NULL,
-    version             INT             NOT NULL DEFAULT 0,
-    created_at          TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at          TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    created_by          CHAR(36)        NOT NULL,
-    updated_by          CHAR(36),
-    CONSTRAINT chk_complaints_category CHECK (category IN ('ELECTRICAL','PLUMBING','HVAC','STRUCTURAL','IT','CLEANING','SAFETY','OTHER')),
-    CONSTRAINT chk_complaints_priority CHECK (priority IN ('CRITICAL','HIGH','MEDIUM','LOW')),
-    CONSTRAINT chk_complaints_status CHECK (status IN ('OPEN','ASSIGNED','IN_PROGRESS','ON_HOLD','RESOLVED','CLOSED','CANCELLED','ESCALATED')),
-    INDEX idx_complaints_tenant (tenant_id),
-    INDEX idx_complaints_status (status),
-    INDEX idx_complaints_requester (requester_id),
-    INDEX idx_complaints_assigned (assigned_to_id),
-    INDEX idx_complaints_sla (sla_deadline, sla_breached),
-    INDEX idx_complaints_created (created_at)
-);
+    complaint_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    reporter_user_id BIGINT UNSIGNED NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    priority ENUM('LOW','MEDIUM','HIGH','CRITICAL') NOT NULL DEFAULT 'MEDIUM',
+    status ENUM('OPEN','IN_PROGRESS','RESOLVED','CLOSED','REJECTED') NOT NULL DEFAULT 'OPEN',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_complaints_reporter FOREIGN KEY (reporter_user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+) ENGINE=InnoDB;
 ```
+*Indexes*: `status`, `priority`, `reporter_user_id`.
 
----
-
-### 4.3 `complaint_attachments`
-
-Stores metadata for files attached to complaints (actual files in S3).
-
+#### `complaint_attachments`
 ```sql
 CREATE TABLE complaint_attachments (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    complaint_id    CHAR(36)        NOT NULL,
-    tenant_id       CHAR(36)        NOT NULL,
-    file_name       VARCHAR(255)    NOT NULL,
-    file_type       VARCHAR(100)    NOT NULL,                 -- MIME type
-    file_size_bytes BIGINT          NOT NULL,
-    s3_key          VARCHAR(1000)   NOT NULL,                 -- S3 object key
-    s3_bucket       VARCHAR(255)    NOT NULL,
-    uploaded_by     CHAR(36)        NOT NULL,
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_ca_complaint FOREIGN KEY (complaint_id) REFERENCES complaints(id),
-    INDEX idx_ca_complaint (complaint_id)
-);
+    attachment_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    complaint_id BIGINT UNSIGNED NOT NULL,
+    file_path VARCHAR(512) NOT NULL,
+    mime_type VARCHAR(100),
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_att_complaint FOREIGN KEY (complaint_id) REFERENCES complaints(complaint_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
 ```
 
----
-
-### 4.4 `complaint_comments`
-
-Threaded comments on a complaint from any stakeholder.
-
+#### `complaint_comments`
 ```sql
 CREATE TABLE complaint_comments (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    complaint_id    CHAR(36)        NOT NULL,
-    tenant_id       CHAR(36)        NOT NULL,
-    author_id       CHAR(36)        NOT NULL,                 -- User who posted
-    author_role     VARCHAR(50)     NOT NULL,
-    content         TEXT            NOT NULL,
-    is_internal     BOOLEAN         NOT NULL DEFAULT FALSE,   -- Internal notes hidden from customer
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_cc_complaint FOREIGN KEY (complaint_id) REFERENCES complaints(id),
-    INDEX idx_cc_complaint (complaint_id)
-);
+    comment_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    complaint_id BIGINT UNSIGNED NOT NULL,
+    author_user_id BIGINT UNSIGNED NOT NULL,
+    comment TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_comment_complaint FOREIGN KEY (complaint_id) REFERENCES complaints(complaint_id) ON DELETE CASCADE,
+    CONSTRAINT fk_comment_user FOREIGN KEY (author_user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+) ENGINE=InnoDB;
 ```
-
 ---
 
-## 5. Technician Service Database – `fixflow_technicians`
+## 3. Work Order Service
 
-### 5.1 `technicians`
+### Purpose
+Creates work orders derived from complaints, tracks execution by field technicians, and records completion data.
 
-Technician profile record (mirrors user data from User Service for the TECHNICIAN role).
+### Tables
+| Table | Description |
+|-------|-------------|
+| `work_orders` | Core work‑order entity.
+| `work_order_assignments` | Technician assignments.
+| `work_order_logs` | Time‑stamped activity logs.
+| `work_order_parts` | Parts/materials used.
 
+#### `work_orders`
 ```sql
-CREATE TABLE technicians (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    tenant_id       CHAR(36)        NOT NULL,
-    user_id         CHAR(36)        NOT NULL UNIQUE,          -- Ref to users.id in User Service
-    employee_id     VARCHAR(50),
-    zone            VARCHAR(255),                             -- Assigned physical zone/building
-    status          VARCHAR(50)     NOT NULL DEFAULT 'AVAILABLE',
-    max_concurrent_jobs INT         NOT NULL DEFAULT 3,
-    is_deleted      BOOLEAN         NOT NULL DEFAULT FALSE,
-    deleted_at      TIMESTAMP       NULL,
-    version         INT             NOT NULL DEFAULT 0,
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT chk_tech_status CHECK (status IN ('AVAILABLE','BUSY','ON_LEAVE','INACTIVE')),
-    INDEX idx_tech_tenant (tenant_id),
-    INDEX idx_tech_status (status)
-);
+CREATE TABLE work_orders (
+    wo_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    source_complaint_id BIGINT UNSIGNED NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    status ENUM('OPEN','ASSIGNED','IN_PROGRESS','COMPLETED','CANCELLED') NOT NULL DEFAULT 'OPEN',
+    priority ENUM('LOW','MEDIUM','HIGH','CRITICAL') NOT NULL DEFAULT 'MEDIUM',
+    scheduled_start DATETIME,
+    scheduled_end DATETIME,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_wo_complaint FOREIGN KEY (source_complaint_id) REFERENCES complaints(complaint_id) ON DELETE RESTRICT
+) ENGINE=InnoDB;
 ```
+*Indexes*: `status`, `priority`, `source_complaint_id`.
 
----
-
-### 5.2 `technician_skills`
-
-Skills and certifications per technician (used for auto-assignment matching).
-
+#### `work_order_assignments`
 ```sql
-CREATE TABLE technician_skills (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    technician_id   CHAR(36)        NOT NULL,
-    category        VARCHAR(50)     NOT NULL,                 -- Matches complaint category
-    proficiency     VARCHAR(20)     NOT NULL DEFAULT 'INTERMEDIATE',
-    certified       BOOLEAN         NOT NULL DEFAULT FALSE,
-    cert_expiry     DATE            NULL,
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_ts_tech_cat UNIQUE (technician_id, category),
-    CONSTRAINT chk_ts_category CHECK (category IN ('ELECTRICAL','PLUMBING','HVAC','STRUCTURAL','IT','CLEANING','SAFETY','OTHER')),
-    CONSTRAINT chk_ts_proficiency CHECK (proficiency IN ('BEGINNER','INTERMEDIATE','EXPERT')),
-    CONSTRAINT fk_ts_technician FOREIGN KEY (technician_id) REFERENCES technicians(id)
-);
+CREATE TABLE work_order_assignments (
+    wo_id BIGINT UNSIGNED NOT NULL,
+    technician_user_id BIGINT UNSIGNED NOT NULL,
+    assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (wo_id, technician_user_id),
+    CONSTRAINT fk_assign_wo FOREIGN KEY (wo_id) REFERENCES work_orders(wo_id) ON DELETE CASCADE,
+    CONSTRAINT fk_assign_user FOREIGN KEY (technician_user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+) ENGINE=InnoDB;
 ```
-
 ---
 
-### 5.3 `assignments`
+## 4. Notification Service
 
-Links a complaint to a technician; tracks the full job lifecycle.
+### Purpose
+Delivers email, SMS, push‑notifications, or in‑app alerts based on events generated by other services.
 
-```sql
-CREATE TABLE assignments (
-    id                  CHAR(36)        NOT NULL PRIMARY KEY,
-    tenant_id           CHAR(36)        NOT NULL,
-    complaint_id        CHAR(36)        NOT NULL,             -- Ref in Complaint Service
-    technician_id       CHAR(36)        NOT NULL,
-    assigned_by         CHAR(36)        NOT NULL,             -- Manager/system userId
-    assignment_type     VARCHAR(20)     NOT NULL DEFAULT 'AUTO',  -- AUTO, MANUAL
-    status              VARCHAR(50)     NOT NULL DEFAULT 'PENDING',
-    priority            VARCHAR(20)     NOT NULL DEFAULT 'MEDIUM',
-    scheduled_at        TIMESTAMP       NULL,
-    accepted_at         TIMESTAMP       NULL,
-    started_at          TIMESTAMP       NULL,
-    completed_at        TIMESTAMP       NULL,
-    on_hold_at          TIMESTAMP       NULL,
-    on_hold_reason      TEXT,
-    resolution_summary  TEXT,
-    is_deleted          BOOLEAN         NOT NULL DEFAULT FALSE,
-    version             INT             NOT NULL DEFAULT 0,
-    created_at          TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at          TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT chk_assign_status CHECK (status IN ('PENDING','ACCEPTED','IN_PROGRESS','ON_HOLD','COMPLETED','CANCELLED')),
-    CONSTRAINT chk_assign_type CHECK (assignment_type IN ('AUTO','MANUAL')),
-    CONSTRAINT fk_assign_technician FOREIGN KEY (technician_id) REFERENCES technicians(id),
-    INDEX idx_assign_technician (technician_id),
-    INDEX idx_assign_complaint (complaint_id),
-    INDEX idx_assign_status (status),
-    INDEX idx_assign_tenant (tenant_id)
-);
-```
+### Tables
+| Table | Description |
+|-------|-------------|
+| `notifications` | Outbound notification records.
+| `notification_templates` | Re‑usable message templates.
+| `notification_subscriptions` | User subscription preferences.
 
----
-
-### 5.4 `assignment_notes`
-
-Work notes added by technicians during job execution.
-
-```sql
-CREATE TABLE assignment_notes (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    assignment_id   CHAR(36)        NOT NULL,
-    technician_id   CHAR(36)        NOT NULL,
-    note_type       VARCHAR(30)     NOT NULL DEFAULT 'PROGRESS',  -- PROGRESS, ISSUE, RESOLUTION
-    content         TEXT            NOT NULL,
-    attachment_url  VARCHAR(1000),
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_an_assignment FOREIGN KEY (assignment_id) REFERENCES assignments(id),
-    INDEX idx_an_assignment (assignment_id)
-);
-```
-
----
-
-### 5.5 `technician_availability`
-
-Calendar-based availability records for leave and shift management.
-
-```sql
-CREATE TABLE technician_availability (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    technician_id   CHAR(36)        NOT NULL,
-    availability_type VARCHAR(20)   NOT NULL,                 -- LEAVE, SHIFT, TRAINING
-    start_date      DATE            NOT NULL,
-    end_date        DATE            NOT NULL,
-    notes           VARCHAR(500),
-    approved_by     CHAR(36),
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_ta_type CHECK (availability_type IN ('LEAVE','SHIFT','TRAINING','OTHER')),
-    CONSTRAINT fk_ta_technician FOREIGN KEY (technician_id) REFERENCES technicians(id),
-    INDEX idx_ta_technician_dates (technician_id, start_date, end_date)
-);
-```
-
----
-
-## 6. Notification Service Database – `fixflow_notifications`
-
-### 6.1 `notification_templates`
-
-Per-tenant, per-event-type message templates (Thymeleaf syntax).
-
-```sql
-CREATE TABLE notification_templates (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    tenant_id       CHAR(36)        NOT NULL,
-    event_type      VARCHAR(100)    NOT NULL,
-    channel         VARCHAR(20)     NOT NULL,                 -- EMAIL, SMS, IN_APP
-    subject         VARCHAR(500),                             -- Email subject (supports variables)
-    body_template   TEXT            NOT NULL,                 -- Thymeleaf template
-    is_active       BOOLEAN         NOT NULL DEFAULT TRUE,
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT uq_nt_tenant_event_channel UNIQUE (tenant_id, event_type, channel),
-    CONSTRAINT chk_nt_channel CHECK (channel IN ('EMAIL','SMS','IN_APP'))
-);
-```
-
----
-
-### 6.2 `notifications`
-
-Each notification instance created for a user based on an event.
-
+#### `notifications`
 ```sql
 CREATE TABLE notifications (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    tenant_id       CHAR(36)        NOT NULL,
-    recipient_id    CHAR(36)        NOT NULL,                 -- Target userId
-    event_type      VARCHAR(100)    NOT NULL,
-    channel         VARCHAR(20)     NOT NULL,
-    subject         VARCHAR(500),
-    body            TEXT            NOT NULL,
-    reference_id    CHAR(36),                                 -- Related entity (complaint/assignment)
-    reference_type  VARCHAR(50),                              -- COMPLAINT, ASSIGNMENT
-    status          VARCHAR(20)     NOT NULL DEFAULT 'PENDING',
-    read_at         TIMESTAMP       NULL,
-    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_notif_status CHECK (status IN ('PENDING','SENT','READ','FAILED')),
-    INDEX idx_notif_recipient (recipient_id, status),
-    INDEX idx_notif_tenant (tenant_id)
-);
+    notification_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    recipient_user_id BIGINT UNSIGNED NOT NULL,
+    channel ENUM('EMAIL','SMS','PUSH','IN_APP') NOT NULL,
+    template_id INT UNSIGNED,
+    payload JSON,
+    status ENUM('PENDING','SENT','FAILED') NOT NULL DEFAULT 'PENDING',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sent_at TIMESTAMP NULL,
+    CONSTRAINT fk_notif_user FOREIGN KEY (recipient_user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    CONSTRAINT fk_notif_template FOREIGN KEY (template_id) REFERENCES notification_templates(template_id) ON DELETE SET NULL
+) ENGINE=InnoDB;
 ```
+*Indexes*: `status`, `recipient_user_id`.
 
----
-
-### 6.3 `notification_delivery_logs`
-
-Full delivery audit log for every send attempt.
-
+#### `notification_subscriptions`
 ```sql
-CREATE TABLE notification_delivery_logs (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    notification_id CHAR(36)        NOT NULL,
-    attempt_number  INT             NOT NULL DEFAULT 1,
-    channel         VARCHAR(20)     NOT NULL,
-    recipient_address VARCHAR(500)  NOT NULL,                 -- Email/phone
-    status          VARCHAR(20)     NOT NULL,                 -- SENT, FAILED, BOUNCED
-    provider_response TEXT,                                   -- External API response body
-    attempted_at    TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_ndl_notification FOREIGN KEY (notification_id) REFERENCES notifications(id),
-    INDEX idx_ndl_notification (notification_id)
-);
+CREATE TABLE notification_subscriptions (
+    user_id BIGINT UNSIGNED PRIMARY KEY,
+    email_opt_in BOOLEAN NOT NULL DEFAULT TRUE,
+    sms_opt_in BOOLEAN NOT NULL DEFAULT FALSE,
+    push_opt_in BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_sub_user FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
 ```
-
 ---
 
-## 7. Reporting Service Database – `fixflow_reporting`
+## 5. Reporting Service
 
-### 7.1 `complaint_metrics`
+### Purpose
+Provides aggregated, read‑only views for dashboards and export (CSV/Excel).  It **does not** own write‑able data; it consumes Kafka topics and populates materialized view tables.
 
-Pre-aggregated daily complaint statistics per tenant (materialized by Kafka consumers).
+### Tables (read‑only, populated by CDC / Kafka)
+| Table | Description |
+|-------|-------------|
+| `report_complaint_summary` | One‑row per complaint with current status, age, and assigned work‑order.
+| `report_work_order_metrics` | Aggregated metrics per technician, priority, SLA compliance.
+| `report_user_activity` | Counts of login, complaint creation, work‑order actions.
 
+#### `report_complaint_summary`
 ```sql
-CREATE TABLE complaint_metrics (
-    id                      CHAR(36)    NOT NULL PRIMARY KEY,
-    tenant_id               CHAR(36)    NOT NULL,
-    metric_date             DATE        NOT NULL,
-    category                VARCHAR(50) NOT NULL,
-    priority                VARCHAR(20) NOT NULL,
-    total_opened            INT         NOT NULL DEFAULT 0,
-    total_resolved          INT         NOT NULL DEFAULT 0,
-    total_escalated         INT         NOT NULL DEFAULT 0,
-    total_sla_breached      INT         NOT NULL DEFAULT 0,
-    avg_resolution_hours    DECIMAL(10,2),
-    created_at              TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at              TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT uq_cm_tenant_date_cat_pri UNIQUE (tenant_id, metric_date, category, priority),
-    INDEX idx_cm_tenant_date (tenant_id, metric_date)
-);
+CREATE TABLE report_complaint_summary (
+    complaint_id BIGINT UNSIGNED PRIMARY KEY,
+    title VARCHAR(255),
+    status VARCHAR(20),
+    priority VARCHAR(20),
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    assigned_wo_id BIGINT UNSIGNED,
+    assigned_technician_id BIGINT UNSIGNED,
+    INDEX idx_status (status),
+    INDEX idx_priority (priority)
+) ENGINE=InnoDB;
+```
+*Note*: Populated by a Kafka consumer that merges `complaints`, `work_orders`, and `work_order_assignments`.
+
+---
+
+## Inter‑Service Communication
+
+1. **REST/gRPC APIs** – Each service exposes an HTTP/gRPC endpoint for the operations it owns (e.g., `GET /users/{id}` in Identity, `POST /complaints` in Complaint).  Clients (frontend or other services) call these APIs; they never issue SQL against another service’s DB.
+2. **Event‑Driven Synchronisation via Kafka** – When a microservice changes its state it publishes a domain event to a Kafka topic:
+   * `identity.user-created`, `identity.user-updated`
+   * `complaint.created`, `complaint.status-changed`
+   * `workorder.created`, `workorder.status-updated`
+   * `notification.sent`
+   * `reporting.refresh-request`
+3. **Consumers** – Other services subscribe to the topics they need.  For example, the **Work Order Service** consumes `complaint.created` to automatically generate a work order, while the **Reporting Service** consumes `complaint.*` and `workorder.*` to keep its materialized tables in sync.
+4. **Event schema** – Use Avro/Protobuf with a shared schema registry.  Each event contains a UUID, timestamp, and the minimal payload required (e.g., `complaintId`, `status`).
+5. **Idempotency & Ordering** – Kafka partitions are keyed by the aggregate root ID (e.g., `complaintId`).  This guarantees ordering per entity and enables idempotent processing via the event’s UUID.
+
+---
+
+## Mermaid ER Diagrams
+
+### Identity Service
+```mermaid
+erDiagram
+    users ||--o{ user_roles : "has"
+    users ||--|| user_credentials : "has"
+    roles ||--o{ user_roles : "assigned to"
+    users ||--o{ complaint_comments : "writes"
+    users ||--o{ complaint_attachments : "uploads"
+```
+
+### Complaint Service
+```mermaid
+erDiagram
+    complaints ||--o{ complaint_attachments : "has"
+    complaints ||--o{ complaint_comments : "has"
+    complaints ||--o{ complaint_history : "records"
+    complaints }|..|{ work_orders : "generates"
+```
+
+### Work Order Service
+```mermaid
+erDiagram
+    work_orders ||--o{ work_order_assignments : "assigned to"
+    work_orders ||--o{ work_order_logs : "logs"
+    work_orders ||--o{ work_order_parts : "uses"
+    work_orders }|..|{ complaints : "originates from"
 ```
 
 ---
 
-### 7.2 `technician_metrics`
+## Production‑Readiness Tips for Spring Boot
 
-Daily performance metrics per technician.
-
-```sql
-CREATE TABLE technician_metrics (
-    id                      CHAR(36)    NOT NULL PRIMARY KEY,
-    tenant_id               CHAR(36)    NOT NULL,
-    technician_id           CHAR(36)    NOT NULL,
-    metric_date             DATE        NOT NULL,
-    jobs_assigned           INT         NOT NULL DEFAULT 0,
-    jobs_completed          INT         NOT NULL DEFAULT 0,
-    jobs_on_hold            INT         NOT NULL DEFAULT 0,
-    avg_completion_hours    DECIMAL(10,2),
-    sla_compliance_rate     DECIMAL(5,2),                     -- Percentage
-    created_at              TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at              TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT uq_tm_tech_date UNIQUE (technician_id, metric_date),
-    INDEX idx_tm_tenant_date (tenant_id, metric_date)
-);
-```
+* **Flyway** or **Liquibase** migrations – keep each service’s `db/migration` folder under version control.
+* **Connection pooling** – use HikariCP with appropriate max‑pool size per service.
+* **Read‑replicas** – for reporting or heavy read patterns, configure a read‑only replica and point the Reporting Service at it.
+* **Circuit breakers** – wrap remote API calls (e.g., Identity lookup) with Resilience4j to avoid cascading failures.
+* **Transaction boundaries** – each service owns a single DB transaction; cross‑service consistency is achieved via eventual consistency (Kafka events).
+* **Testing** – unit‑test each repository layer; integration tests spin up a MySQL Docker container per service.
 
 ---
 
-### 7.3 `audit_events`
-
-Centralized audit event store aggregated from all Kafka topics.
-
-```sql
-CREATE TABLE audit_events (
-    id              CHAR(36)        NOT NULL PRIMARY KEY,
-    tenant_id       CHAR(36)        NOT NULL,
-    event_id        CHAR(36)        NOT NULL UNIQUE,          -- Kafka event UUID (idempotency)
-    event_type      VARCHAR(100)    NOT NULL,
-    source_service  VARCHAR(100)    NOT NULL,
-    actor_id        CHAR(36),
-    entity_type     VARCHAR(100),
-    entity_id       CHAR(36),
-    payload         JSON,
-    occurred_at     TIMESTAMP       NOT NULL,
-    ingested_at     TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_ae_tenant_occurred (tenant_id, occurred_at),
-    INDEX idx_ae_entity (entity_type, entity_id),
-    INDEX idx_ae_event_type (event_type)
-);
-```
-
----
-
-## 8. Entity Relationship Overview
-
-```
-fixflow_users:
-  tenants (1) ──────── (*) users
-  users   (*) ──────── (*) roles        [via user_roles]
-  users   (1) ──────── (*) refresh_tokens
-
-fixflow_complaints:
-  complaints (1) ────── (*) complaint_attachments
-  complaints (1) ────── (*) complaint_comments
-  sla_configurations ── (drives SLA on) ── complaints
-
-fixflow_technicians:
-  technicians (1) ───── (*) technician_skills
-  technicians (1) ───── (*) assignments
-  assignments (1) ───── (*) assignment_notes
-  technicians (1) ───── (*) technician_availability
-
-fixflow_notifications:
-  notification_templates ── (renders) ── notifications
-  notifications      (1) ─── (*) notification_delivery_logs
-
-fixflow_reporting:
-  audit_events          [aggregated from all Kafka events]
-  complaint_metrics     [pre-aggregated from complaint-events]
-  technician_metrics    [pre-aggregated from assignment-events]
-
-Cross-service references (by ID, no FK constraints):
-  complaints.requester_id      → fixflow_users.users.id
-  complaints.assigned_to_id    → fixflow_technicians.technicians.id
-  technicians.user_id          → fixflow_users.users.id
-  assignments.complaint_id     → fixflow_complaints.complaints.id
-  notifications.recipient_id   → fixflow_users.users.id
-```
-
-> **Note:** Cross-schema foreign keys are **intentionally absent**. Services reference other service entities by UUID only. Data consistency is maintained through Kafka events and eventual consistency patterns.
-
----
-
-## 9. Data Types & Conventions
-
-| Column Type | Usage | MySQL Type |
-|-------------|-------|-----------|
-| Primary Keys | All entity IDs | `CHAR(36)` (UUID v4) |
-| Names / Titles | Short text fields | `VARCHAR(255)` |
-| Long text | Descriptions, notes, templates | `TEXT` |
-| Enums | Status, priority, category | `VARCHAR(50)` + CHECK constraint |
-| Timestamps | All date/time fields | `TIMESTAMP` (UTC stored) |
-| Boolean flags | Active/deleted/enabled | `BOOLEAN` (TINYINT(1)) |
-| Monetary / Rates | Percentages, metrics | `DECIMAL(10,2)` |
-| JSON | Flexible payloads, audit details | `JSON` (MySQL 8+ native) |
-| File sizes | Bytes | `BIGINT` |
-| Counters | Version, attempt numbers | `INT` |
-
-### Naming Conventions
-
-- Table names: `snake_case`, plural nouns
-- Column names: `snake_case`
-- Primary keys: always `id`
-- Foreign key columns: `{referenced_table_singular}_id`
-- Boolean columns: prefix with `is_` or `has_`
-- Timestamp columns: suffix with `_at`
-- Index names: `idx_{table}_{columns}`
-- Constraint names: `fk_{table}_{ref}`, `uq_{table}_{columns}`, `chk_{table}_{column}`
-
----
-
-## 10. Indexing Strategy
-
-### High-Priority Indexes
-
-| Table | Index | Reason |
-|-------|-------|--------|
-| `users` | `(email, tenant_id)` | Login lookup |
-| `complaints` | `(tenant_id, status)` | Dashboard filtering |
-| `complaints` | `(sla_deadline, sla_breached)` | SLA monitoring queries |
-| `complaints` | `(requester_id)` | Customer "my complaints" view |
-| `assignments` | `(technician_id, status)` | Technician job queue |
-| `assignments` | `(complaint_id)` | Complaint-to-assignment join |
-| `notifications` | `(recipient_id, status)` | Unread notification count |
-| `audit_events` | `(tenant_id, occurred_at)` | Compliance log queries |
-| `refresh_tokens` | `(token_hash)` | Token validation |
-
-### Flyway Migration File Structure
-
-```
-src/main/resources/db/migration/
-├── V1__create_initial_schema.sql
-├── V2__add_sla_configurations.sql
-├── V3__add_audit_log_indexes.sql
-├── V4__add_mfa_columns_to_users.sql
-└── ...
-```
-
----
-
-*Document End – FixFlow Database Design Document v1.0.0*
+*Document generated on 2026‑11‑15.*
