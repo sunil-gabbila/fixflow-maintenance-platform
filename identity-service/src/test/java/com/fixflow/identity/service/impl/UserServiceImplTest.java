@@ -2,6 +2,7 @@ package com.fixflow.identity.service.impl;
 
 import com.fixflow.identity.dto.request.RegisterRequest;
 import com.fixflow.identity.dto.request.UpdateUserRequest;
+import com.fixflow.identity.dto.response.PageResponse;
 import com.fixflow.identity.dto.response.UserResponse;
 import com.fixflow.identity.entity.Role;
 import com.fixflow.identity.entity.User;
@@ -18,6 +19,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 import java.time.LocalDateTime;
@@ -396,6 +401,205 @@ class UserServiceImplTest {
                     .hasMessageContaining("99");
 
             verify(userRepository, never()).delete(any(User.class));
+        }
+    }
+
+    // ========== GET USERS (PAGINATED) ==========
+
+    @Nested
+    @DisplayName("getUsers() - Pagination")
+    class GetUsersPaginatedTests {
+
+        private User secondUser;
+
+        @BeforeEach
+        void setUpPagination() {
+            secondUser = User.builder()
+                    .id(2L)
+                    .firstName("Jane")
+                    .lastName("Smith")
+                    .email("jane@example.com")
+                    .password("hashedPassword456")
+                    .roles(new HashSet<>(Set.of(customerRole)))
+                    .createdAt(LocalDateTime.now())
+                    .updatedAt(LocalDateTime.now())
+                    .build();
+        }
+
+        @Test
+        @DisplayName("Should return paginated users with default page=0, size=10")
+        void getUsers_DefaultPagination() {
+            Pageable pageable = PageRequest.of(0, 10);
+            Page<User> page = new PageImpl<>(List.of(testUser, secondUser), pageable, 2);
+
+            when(userRepository.findAll(pageable)).thenReturn(page);
+
+            PageResponse<UserResponse> result = userService.getUsers(0, 10);
+
+            assertThat(result).isNotNull();
+            assertThat(result.getContent()).hasSize(2);
+            assertThat(result.getPage()).isEqualTo(0);
+            assertThat(result.getSize()).isEqualTo(10);
+            assertThat(result.getTotalElements()).isEqualTo(2);
+            assertThat(result.getTotalPages()).isEqualTo(1);
+            assertThat(result.isLast()).isTrue();
+
+            verify(userRepository).findAll(pageable);
+        }
+
+        @Test
+        @DisplayName("Should return paginated users with custom page and size")
+        void getUsers_CustomPageAndSize() {
+            Pageable pageable = PageRequest.of(1, 1);
+            Page<User> page = new PageImpl<>(List.of(secondUser), pageable, 2);
+
+            when(userRepository.findAll(pageable)).thenReturn(page);
+
+            PageResponse<UserResponse> result = userService.getUsers(1, 1);
+
+            assertThat(result).isNotNull();
+            assertThat(result.getContent()).hasSize(1);
+            assertThat(result.getContent().get(0).getEmail()).isEqualTo("jane@example.com");
+            assertThat(result.getPage()).isEqualTo(1);
+            assertThat(result.getSize()).isEqualTo(1);
+            assertThat(result.getTotalElements()).isEqualTo(2);
+            assertThat(result.getTotalPages()).isEqualTo(2);
+            assertThat(result.isLast()).isTrue();
+
+            verify(userRepository).findAll(pageable);
+        }
+
+        @Test
+        @DisplayName("Should return empty content when no users exist")
+        void getUsers_EmptyResults() {
+            Pageable pageable = PageRequest.of(0, 10);
+            Page<User> page = new PageImpl<>(Collections.emptyList(), pageable, 0);
+
+            when(userRepository.findAll(pageable)).thenReturn(page);
+
+            PageResponse<UserResponse> result = userService.getUsers(0, 10);
+
+            assertThat(result).isNotNull();
+            assertThat(result.getContent()).isEmpty();
+            assertThat(result.getPage()).isEqualTo(0);
+            assertThat(result.getSize()).isEqualTo(10);
+            assertThat(result.getTotalElements()).isEqualTo(0);
+            assertThat(result.getTotalPages()).isEqualTo(0);
+            assertThat(result.isLast()).isTrue();
+
+            verify(userRepository).findAll(pageable);
+        }
+
+        @Test
+        @DisplayName("Should throw IllegalArgumentException when page is negative")
+        void getUsers_NegativePage() {
+            assertThatThrownBy(() -> userService.getUsers(-1, 10))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Page index must be non-negative");
+
+            verify(userRepository, never()).findAll(any(Pageable.class));
+        }
+
+        @Test
+        @DisplayName("Should throw IllegalArgumentException when size is zero")
+        void getUsers_SizeZero() {
+            assertThatThrownBy(() -> userService.getUsers(0, 0))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Size must be between 1 and 100");
+
+            verify(userRepository, never()).findAll(any(Pageable.class));
+        }
+
+        @Test
+        @DisplayName("Should throw IllegalArgumentException when size is negative")
+        void getUsers_NegativeSize() {
+            assertThatThrownBy(() -> userService.getUsers(0, -5))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Size must be between 1 and 100");
+
+            verify(userRepository, never()).findAll(any(Pageable.class));
+        }
+
+        @Test
+        @DisplayName("Should throw IllegalArgumentException when size exceeds 100")
+        void getUsers_SizeExceeds100() {
+            assertThatThrownBy(() -> userService.getUsers(0, 101))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Size must be between 1 and 100");
+
+            verify(userRepository, never()).findAll(any(Pageable.class));
+        }
+
+        @Test
+        @DisplayName("Should accept size=1 (minimum boundary)")
+        void getUsers_SizeMinBoundary() {
+            Pageable pageable = PageRequest.of(0, 1);
+            Page<User> page = new PageImpl<>(List.of(testUser), pageable, 2);
+
+            when(userRepository.findAll(pageable)).thenReturn(page);
+
+            PageResponse<UserResponse> result = userService.getUsers(0, 1);
+
+            assertThat(result.getContent()).hasSize(1);
+            assertThat(result.getSize()).isEqualTo(1);
+            assertThat(result.getTotalElements()).isEqualTo(2);
+            assertThat(result.getTotalPages()).isEqualTo(2);
+            assertThat(result.isLast()).isFalse();
+        }
+
+        @Test
+        @DisplayName("Should accept size=100 (maximum boundary)")
+        void getUsers_SizeMaxBoundary() {
+            Pageable pageable = PageRequest.of(0, 100);
+            Page<User> page = new PageImpl<>(List.of(testUser, secondUser), pageable, 2);
+
+            when(userRepository.findAll(pageable)).thenReturn(page);
+
+            PageResponse<UserResponse> result = userService.getUsers(0, 100);
+
+            assertThat(result.getContent()).hasSize(2);
+            assertThat(result.getSize()).isEqualTo(100);
+            assertThat(result.getTotalElements()).isEqualTo(2);
+            assertThat(result.getTotalPages()).isEqualTo(1);
+            assertThat(result.isLast()).isTrue();
+        }
+
+        @Test
+        @DisplayName("Should correctly calculate totalPages and report last flag")
+        void getUsers_CorrectTotalPagesAndLastFlag() {
+            // 15 total users, page size 5 → 3 pages; requesting page 0 → not last
+            Pageable pageable = PageRequest.of(0, 5);
+            Page<User> page = new PageImpl<>(
+                    List.of(testUser, secondUser, testUser, secondUser, testUser),
+                    pageable,
+                    15
+            );
+
+            when(userRepository.findAll(pageable)).thenReturn(page);
+
+            PageResponse<UserResponse> result = userService.getUsers(0, 5);
+
+            assertThat(result.getTotalElements()).isEqualTo(15);
+            assertThat(result.getTotalPages()).isEqualTo(3);
+            assertThat(result.isLast()).isFalse();
+        }
+
+        @Test
+        @DisplayName("Should never expose password in paginated results")
+        void getUsers_NeverExposesPassword() {
+            Pageable pageable = PageRequest.of(0, 10);
+            Page<User> page = new PageImpl<>(List.of(testUser), pageable, 1);
+
+            when(userRepository.findAll(pageable)).thenReturn(page);
+
+            PageResponse<UserResponse> result = userService.getUsers(0, 10);
+
+            assertThat(result.getContent()).hasSize(1);
+            UserResponse userResponse = result.getContent().get(0);
+            // UserResponse does not have a password field — verify by checking mapped fields only
+            assertThat(userResponse.getId()).isEqualTo(testUser.getId());
+            assertThat(userResponse.getFirstName()).isEqualTo(testUser.getFirstName());
+            assertThat(userResponse.getEmail()).isEqualTo(testUser.getEmail());
         }
     }
 }

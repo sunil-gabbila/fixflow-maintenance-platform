@@ -2,6 +2,7 @@ package com.fixflow.identity.service.impl;
 
 import com.fixflow.identity.dto.request.RegisterRequest;
 import com.fixflow.identity.dto.request.UpdateUserRequest;
+import com.fixflow.identity.dto.response.PageResponse;
 import com.fixflow.identity.dto.response.UserResponse;
 import com.fixflow.identity.entity.Role;
 import com.fixflow.identity.entity.User;
@@ -13,6 +14,9 @@ import com.fixflow.identity.repository.UserRepository;
 import com.fixflow.identity.service.UserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -77,6 +81,35 @@ public class UserServiceImpl implements UserService {
                 });
 
         return UserResponse.fromEntity(user);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public PageResponse<UserResponse> getUsers(int page, int size) {
+        if (page < 0) {
+            throw new IllegalArgumentException("Page index must be non-negative");
+        }
+        if (size < 1 || size > 100) {
+            throw new IllegalArgumentException("Size must be between 1 and 100");
+        }
+
+        log.info("Fetching users page {} with size {}", page, size);
+
+        Pageable pageable = PageRequest.of(page, size);
+        Page<User> pageResult = userRepository.findAll(pageable);
+
+        List<UserResponse> content = pageResult.getContent().stream()
+                .map(UserResponse::fromEntity)
+                .collect(Collectors.toList());
+
+        return PageResponse.<UserResponse>builder()
+                .content(content)
+                .page(pageResult.getNumber())
+                .size(pageResult.getSize())
+                .totalElements(pageResult.getTotalElements())
+                .totalPages(pageResult.getTotalPages())
+                .last(pageResult.isLast())
+                .build();
     }
 
     @Override

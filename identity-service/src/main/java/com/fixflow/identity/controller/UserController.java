@@ -2,6 +2,7 @@ package com.fixflow.identity.controller;
 
 import com.fixflow.identity.dto.request.UpdateUserRequest;
 import com.fixflow.identity.dto.response.ApiResponse;
+import com.fixflow.identity.dto.response.PageResponse;
 import com.fixflow.identity.dto.response.UserResponse;
 import com.fixflow.identity.service.UserService;
 import jakarta.validation.Valid;
@@ -13,9 +14,8 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-
-import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/users")
@@ -32,9 +32,12 @@ public class UserController {
     }
 
     @GetMapping
-    public ResponseEntity<ApiResponse<List<UserResponse>>> getAllUsers() {
-        List<UserResponse> users = userService.getAllUsers();
-        ApiResponse<List<UserResponse>> response = ApiResponse.success("Users fetched successfully", users);
+    public ResponseEntity<ApiResponse<PageResponse<UserResponse>>> getAllUsers(
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "size", defaultValue = "10") int size) {
+        PageResponse<UserResponse> pageResponse = userService.getUsers(page, size);
+        ApiResponse<PageResponse<UserResponse>> response =
+                ApiResponse.success("Users fetched successfully", pageResponse);
         return ResponseEntity.ok(response);
     }
 
